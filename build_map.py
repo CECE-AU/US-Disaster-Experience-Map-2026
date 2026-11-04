@@ -72,7 +72,6 @@ metrics = {
     )
 }
 
-# Smooth Continuous Diverging Colorscale for Percentage Point Shift (-50% to +50%)
 CONTINUOUS_CHANGE_COLORSCALE = [
     [0.0,  '#2166ac'],  # -50% (Deep Blue)
     [0.25, '#67a9cf'],  # -25% (Light Blue)
@@ -91,20 +90,8 @@ def make_discrete_colorscale(colors_5):
     ]
 
 # ==============================================================================
-# 3. PURE PYTHON CSV LOADER, LOGO ENCODER & POOLED JENKS CLASSIFIER
+# 3. PURE PYTHON CSV LOADER & POOLED JENKS CLASSIFIER
 # ==============================================================================
-def get_logo_src():
-    """Embeds the logo as Base64 if present locally so index.html is 100% self-contained."""
-    candidates = [LOGO_FILENAME, 'CECE logo color.png', 'logo.png']
-    for fname in candidates:
-        if os.path.exists(fname):
-            with open(fname, 'rb') as img_f:
-                b64 = base64.b64encode(img_f.read()).decode('utf-8')
-            print(f"Embedded logo '{fname}' directly into index.html.")
-            return f"data:image/png;base64,{b64}"
-    print(f"NOTE: '{LOGO_FILENAME}' not found in folder yet; linking by filename '{LOGO_FILENAME}'.")
-    return LOGO_FILENAME
-
 def load_and_clean_csv(filepath):
     rows_by_code = {}
     with open(filepath, mode='r', encoding='utf-8-sig') as f:
@@ -245,7 +232,7 @@ small_states_leaders = {
 }
 
 # ==============================================================================
-# 5. LOAD DATASETS & PRECOMPUTE ALL COMBINATIONS
+# 5. LOAD DATASETS & PRECOMPUTE ALL COMBINATIONS + STATE DETAILS DICTIONARY
 # ==============================================================================
 rows_2026 = load_and_clean_csv(CSV_2026)
 
@@ -262,7 +249,6 @@ else:
 state_codes = [r['State_Code'] for r in rows_2026]
 state_names = [r['State_Full'] for r in rows_2026]
 code_to_idx = {c: i for i, c in enumerate(state_codes)}
-logo_src = get_logo_src()
 
 present_codes = set(state_codes)
 leader_lats, leader_lons = [], []
@@ -283,15 +269,12 @@ center_lons = [state_centers[code][1] for code in center_codes]
 center_texts = center_codes
 
 def get_center_label_colors(z_vals, is_change=False):
-    """Returns white (#ffffff) for dark state fills and dark (#111827) for light state fills."""
     colors = []
     for code in center_codes:
         val = z_vals[code_to_idx[code]]
         if not is_change:
-            # Bins 3 and 4 are the two darkest colors in the 5-class ramp
             colors.append('#ffffff' if val >= 3.0 else '#111827')
         else:
-            # Beyond +/- 25 percentage points on the -50 to +50 continuous ramp
             colors.append('#ffffff' if abs(val) >= 25.0 else '#111827')
     return colors
 
@@ -299,26 +282,40 @@ fixed_breaks = [0.0, 20.0, 40.0, 60.0, 80.0, 100.0]
 fixed_labels = ['0.0% – 20.0%', '20.1% – 40.0%', '40.1% – 60.0%', '60.1% – 80.0%', '80.1% – 100.0%']
 
 views_data = {}
+state_summary = {
+    code: {'name': name, 'metrics': {}}
+    for code, name in zip(state_codes, state_names)
+}
+metric_order = list(metrics.keys())
 
 for metric_key, (val_col, count_col, q_text, hex_ramp) in metrics.items():
     pct_26, cnt_26 = get_percentage_and_count(rows_2026, val_col, count_col)
     pct_25, cnt_25 = get_percentage_and_count(rows_2025, val_col, count_col)
 
-    # Pool 2025 and 2026 values together so Natural Breaks (Jenks) are locked across both years
     pooled_series = (pct_26 + pct_25) if has_separate_2025 else pct_26
     pooled_jenks_breaks = fisher_jenks_breaks(pooled_series, k=5)
     labels_jenks = format_break_labels(pooled_jenks_breaks)
 
     pct_chg = []
-    for p26, p25 in zip(pct_26, pct_25):
+    for i, (code, p26, p25, c26, c25) in enumerate(zip(state_codes, pct_26, pct_25, cnt_26, cnt_25)):
         if CHANGE_TYPE == 'relative':
-            chg = round(((p26 - p25) / p25) * 100.0, 1) if p25 != 0 else 0.0
+            chg_26_vs_25 = round(((p26 - p25) / p25) * 100.0, 1) if p25 != 0 else 0.0
+            chg_25_vs_26 = round(((p25 - p26) / p26) * 100.0, 1) if p26 != 0 else 0.0
         else:
-            chg = round(p26 - p25, 1)
-        pct_chg.append(chg)
+            chg_26_vs_25 = round(p26 - p25, 1)
+            chg_25_vs_26 = round(p25 - p26, 1)
+        pct_chg.append(chg_26_vs_25)
+
+        state_summary[code]['metrics'][metric_key] = {
+            'p26': float(p26),
+            'n26': int(c26),
+            'p25': float(p25),
+            'n25': int(c25),
+            'diff_26_from_25': float(chg_26_vs_25),
+            'diff_25_from_26': float(chg_25_vs_26)
+        }
 
     chg_label_desc = "Relative % Change" if CHANGE_TYPE == 'relative' else "Percentage Point Shift"
-    # Clip continuous z values to [-50, 50] for the -50% to +50% scale
     pct_chg_clipped = [max(-50.0, min(50.0, v)) for v in pct_chg]
 
     views_data[metric_key] = {
@@ -341,7 +338,8 @@ for metric_key, (val_col, count_col, q_text, hex_ramp) in metrics.items():
         hover_tmpl = (
             '<b>%{customdata[0]}</b> (' + yr_key + ')<br>'
             f'{q_text}: <b>%{{customdata[1]:.1f}}%</b><br>'
-            f'Question Respondents: n = %{{customdata[{n_col_idx}]:,.0f}}'
+            f'Question Respondents: n = %{{customdata[{n_col_idx}]:,.0f}}<br>'
+            '<i>Click state to open detailed profile</i>'
             '<extra></extra>'
         )
 
@@ -371,7 +369,8 @@ for metric_key, (val_col, count_col, q_text, hex_ramp) in metrics.items():
         f'{q_text}<br>'
         'Shift: <b>%{customdata[1]:+.1f} pts</b><br>'
         '2025: %{customdata[3]:.1f}% (n=%{customdata[5]:,.0f}) | '
-        '2026: %{customdata[4]:.1f}% (n=%{customdata[2]:,.0f})'
+        '2026: %{customdata[4]:.1f}% (n=%{customdata[2]:,.0f})<br>'
+        '<i>Click state to open detailed profile</i>'
         '<extra></extra>'
     )
 
@@ -406,13 +405,22 @@ html_template = f"""<!DOCTYPE html>
   body {{
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
     margin: 0;
-    padding: 24px 32px;
+    padding: 20px 28px;
     background-color: #ffffff;
     color: #111827;
   }}
   .dashboard-container {{
-    max-width: 1200px;
+    max-width: 1320px;
     margin: 0 auto;
+    position: relative;
+  }}
+
+  /* Top Header Row with Title on Left and Methodology Button on Top Right */
+  .top-header-row {{
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
   }}
   .main-title {{
     font-size: 30px;
@@ -420,6 +428,28 @@ html_template = f"""<!DOCTYPE html>
     color: #111827;
     margin: 0 0 6px 0;
     letter-spacing: -0.02em;
+  }}
+  .methodology-btn {{
+    appearance: none;
+    background: #f9fafb;
+    border: 1px solid #d1d5db;
+    color: #374151;
+    font-size: 12.5px;
+    font-weight: 600;
+    padding: 7px 13px;
+    border-radius: 8px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    transition: all 0.15s ease;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  }}
+  .methodology-btn:hover {{
+    background: #f3f4f6;
+    border-color: #9ca3af;
+    color: #111827;
   }}
   .question-subtitle {{
     font-size: 17px;
@@ -435,24 +465,26 @@ html_template = f"""<!DOCTYPE html>
     font-size: 13px;
     font-style: italic;
     color: #6b7280;
-    margin: 0 0 18px 0;
+    margin: 0 0 16px 0;
   }}
   .subtext-note {{
     color: #dc2626;
     font-weight: 600;
     margin-left: 6px;
   }}
+
+  /* Filter Bar */
   .controls-wrapper {{
     display: flex;
     flex-wrap: wrap;
-    gap: 16px;
+    gap: 14px;
     align-items: center;
     justify-content: space-between;
     background: #f9fafb;
     border: 1px solid #e5e7eb;
     border-radius: 10px;
     padding: 12px 16px;
-    margin-bottom: 6px;
+    margin-bottom: 14px;
   }}
   .control-group {{
     display: flex;
@@ -473,9 +505,9 @@ html_template = f"""<!DOCTYPE html>
     border: 1px solid #d1d5db;
     background: #ffffff;
     color: #374151;
-    font-size: 13px;
+    font-size: 12.5px;
     font-weight: 500;
-    padding: 6px 12px;
+    padding: 6px 11px;
     border-radius: 6px;
     cursor: pointer;
     transition: all 0.15s ease;
@@ -497,16 +529,258 @@ html_template = f"""<!DOCTYPE html>
     cursor: not-allowed;
     opacity: 0.65;
   }}
+
+  /* Main Workspace: State Card hidden until a state is clicked */
+  .main-workspace {{
+    display: flex;
+    align-items: stretch;
+    gap: 18px;
+    width: 100%;
+  }}
+  .state-card {{
+    display: none; /* Hidden by default so map takes 100% width */
+    width: 350px;
+    flex-shrink: 0;
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    padding: 16px 18px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+    flex-direction: column;
+    justify-content: space-between;
+  }}
+  .state-card.visible {{
+    display: flex;
+  }}
+  .card-header {{
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    border-bottom: 2px solid #f3f4f6;
+    padding-bottom: 10px;
+    margin-bottom: 10px;
+  }}
+  .card-state-name {{
+    font-size: 22px;
+    font-weight: 800;
+    color: #111827;
+    margin: 0;
+    line-height: 1.15;
+  }}
+  .card-view-badge {{
+    display: inline-block;
+    margin-top: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #00a38d;
+  }}
+  .clear-btn {{
+    background: #f3f4f6;
+    border: 1px solid #d1d5db;
+    color: #4b5563;
+    font-size: 11px;
+    font-weight: 600;
+    border-radius: 5px;
+    padding: 4px 8px;
+    cursor: pointer;
+  }}
+  .clear-btn:hover {{
+    background: #e5e7eb;
+    color: #111827;
+  }}
+  .card-table {{
+    width: 100%;
+    border-collapse: collapse;
+  }}
+  .card-table th {{
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #6b7280;
+    text-align: left;
+    padding: 6px 6px;
+    border-bottom: 1px solid #e5e7eb;
+  }}
+  .card-table th.right, .card-table td.right {{
+    text-align: right;
+  }}
+  .card-table td {{
+    padding: 9px 6px;
+    border-bottom: 1px solid #f3f4f6;
+    font-size: 12.5px;
+    vertical-align: middle;
+  }}
+  .card-table tr.active-metric-row {{
+    background-color: #f0fdf9;
+  }}
+  .card-table tr.active-metric-row td:first-child {{
+    border-left: 3px solid #00a38d;
+    padding-left: 6px;
+    font-weight: 700;
+    color: #111827;
+  }}
+  .metric-name-cell {{
+    font-weight: 600;
+    color: #374151;
+    line-height: 1.25;
+  }}
+  .metric-n-sub {{
+    display: block;
+    font-size: 11px;
+    font-weight: 400;
+    color: #6b7280;
+    margin-top: 2px;
+  }}
+  .stat-primary {{
+    font-size: 13.5px;
+    font-weight: 700;
+    color: #111827;
+    white-space: nowrap;
+  }}
+  .stat-flow {{
+    font-size: 12.5px;
+    font-weight: 600;
+    color: #1f2937;
+    white-space: nowrap;
+  }}
+  .flow-arrow {{
+    color: #6b7280;
+    margin: 0 3px;
+    font-weight: 700;
+  }}
+  .chg-up {{
+    color: #dc2626;
+    font-weight: 700;
+    font-size: 12.5px;
+    white-space: nowrap;
+  }}
+  .chg-down {{
+    color: #2563eb;
+    font-weight: 700;
+    font-size: 12.5px;
+    white-space: nowrap;
+  }}
+  .chg-flat {{
+    color: #6b7280;
+    font-weight: 600;
+    font-size: 12px;
+    white-space: nowrap;
+  }}
+  .card-footnote {{
+    font-size: 11px;
+    color: #6b7280;
+    font-style: italic;
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid #f3f4f6;
+  }}
+
+  .map-panel {{
+    flex: 1;
+    min-width: 0;
+  }}
   #disaster-map {{
     width: 100%;
-    height: 580px;
+    height: 560px;
+    cursor: pointer;
   }}
+
+  /* Methodology Modal Popover */
+  .modal-backdrop {{
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(17, 24, 39, 0.45);
+    z-index: 9999;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }}
+  .modal-backdrop.open {{
+    display: flex;
+  }}
+  .methodology-modal {{
+    background: #ffffff;
+    border-radius: 12px;
+    max-width: 680px;
+    width: 100%;
+    padding: 24px 28px;
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.15), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+    border: 1px solid #e5e7eb;
+    max-height: 88vh;
+    overflow-y: auto;
+  }}
+  .modal-header {{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid #e5e7eb;
+    padding-bottom: 12px;
+    margin-bottom: 16px;
+  }}
+  .modal-title {{
+    font-size: 20px;
+    font-weight: 800;
+    color: #111827;
+    margin: 0;
+  }}
+  .modal-close-btn {{
+    background: #f3f4f6;
+    border: 1px solid #d1d5db;
+    color: #374151;
+    font-size: 12px;
+    font-weight: 700;
+    border-radius: 6px;
+    padding: 5px 10px;
+    cursor: pointer;
+  }}
+  .modal-close-btn:hover {{
+    background: #e5e7eb;
+    color: #111827;
+  }}
+  .method-item {{
+    margin-bottom: 16px;
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: #374151;
+  }}
+  .method-item:last-child {{
+    margin-bottom: 0;
+  }}
+  .method-item strong {{
+    color: #111827;
+    font-weight: 700;
+  }}
+  .formula-box {{
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin: 8px 0;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 12.5px;
+    color: #111827;
+    text-align: center;
+  }}
+
+  @media (max-width: 980px) {{
+    .main-workspace {{
+      flex-direction: column;
+    }}
+    .state-card {{
+      width: auto;
+    }}
+  }}
+
   .dashboard-footer {{
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 20px;
-    margin-top: 4px;
+    margin-top: 8px;
     padding-top: 10px;
     border-top: 1px solid #f3f4f6;
   }}
@@ -527,12 +801,19 @@ html_template = f"""<!DOCTYPE html>
 <body>
 
 <div class="dashboard-container">
-  <h1 class="main-title">Experience with Disaster in the US</h1>
-  <div class="question-subtitle" id="question-text">
-    "Have You Personally Experienced <span class="question-highlight">Any Climate-Related Disaster</span> In The Last <span class="question-highlight">Twelve Months</span>?"
-  </div>
-  <div class="survey-subtext" id="survey-subtext">
-    Nationally Representative Survey (n=1500), October 2026
+  <div class="top-header-row">
+    <div>
+      <h1 class="main-title">Experience with Disaster in the US</h1>
+      <div class="question-subtitle" id="question-text">
+        "Have You Personally Experienced <span class="question-highlight">Any Climate-Related Disaster</span> In The Last <span class="question-highlight">Twelve Months</span>?"
+      </div>
+      <div class="survey-subtext" id="survey-subtext">
+        Nationally Representative Survey (n=1500), October 2026
+      </div>
+    </div>
+    <button class="methodology-btn" id="open-methodology-btn">
+      &#9432; Map Methodology
+    </button>
   </div>
 
   <div class="controls-wrapper">
@@ -562,19 +843,60 @@ html_template = f"""<!DOCTYPE html>
     </div>
   </div>
 
-  <div id="disaster-map"></div>
+  <!-- Side-by-Side Workspace: State Card stays hidden until a state is clicked -->
+  <div class="main-workspace">
+    <div class="state-card" id="state-card"></div>
+    <div class="map-panel">
+      <div id="disaster-map"></div>
+    </div>
+  </div>
 
   <div class="dashboard-footer">
     <div class="footer-source">
       Research Data: Surveys designed by CECE and administered with YouGov to a nationally representative sample (Oct 2025 &amp; 2026).
     </div>
-    <img src="{logo_src}" alt="American University Center for Environment, Community & Equity" class="footer-logo" />
+    <img src="{LOGO_FILENAME}" alt="American University Center for Environment, Community & Equity" class="footer-logo" />
+  </div>
+</div>
+
+<!-- Map Methodology Modal Card -->
+<div class="modal-backdrop" id="methodology-modal-backdrop">
+  <div class="methodology-modal" role="dialog" aria-labelledby="methodology-modal-title">
+    <div class="modal-header">
+      <h2 class="modal-title" id="methodology-modal-title">Methodology &amp; Map Calculations</h2>
+      <button class="modal-close-btn" id="close-methodology-btn">&#10005; Close</button>
+    </div>
+
+    <div class="method-item">
+      <strong>State-Level Percentages:</strong> Because respondents could skip individual hazard items on the survey, state percentages for each disaster category are calculated using the exact number of valid responses to that specific question in that state (<i>n</i><sub>question</sub>) rather than the overall state sample size:
+      <div class="formula-box">
+        State Percentage = (Respondents Experiencing Hazard / Total Valid Responses to Question) &times; 100
+      </div>
+    </div>
+
+    <div class="method-item">
+      <strong>Pooled Natural Breaks (Fisher-Jenks):</strong> When "Natural Breaks (Jenks)" is selected, states are grouped into 5 discrete classes using the Fisher-Jenks optimization algorithm. This method identifies natural groupings in the data by minimizing variance within each class and maximizing variance between classes. To allow direct visual comparison across years, break thresholds are calculated per disaster category using the pooled 2025 and 2026 state values&mdash;meaning the 5 color bins represent the exact same percentage ranges when toggling between 2025 and 2026.
+    </div>
+
+    <div class="method-item">
+      <strong>Equal Intervals ("Interval/Scale"):</strong> For the 2025 and 2026 views, toggling to "Interval/Scale" switches the legend from data-driven clusters to 5 fixed 20% increments (0.0%&ndash;20.0%, 20.1%&ndash;40.0%, 40.1%&ndash;60.0%, 60.1%&ndash;80.0%, and 80.1%&ndash;100.0%), allowing direct comparison across different disaster types.
+    </div>
+
+    <div class="method-item">
+      <strong>Percentage Point Shift (2025&ndash;2026):</strong> Rather than relative percent change (which exaggerates small baseline numbers), year-over-year change is measured as the arithmetic difference in percentage points between waves:
+      <div class="formula-box">
+        Percentage Point Shift = Percentage<sub>2026</sub> &minus; Percentage<sub>2025</sub>
+      </div>
+      For example, a state moving from 20.0% in 2025 to 30.0% in 2026 reflects a +10.0 percentage point shift. This view uses a continuous diverging color scale locked from &minus;50% to +50% (centered at 0%) and compares a 6-month recall window in October 2025 against a 12-month recall window in October 2026.
+    </div>
   </div>
 </div>
 
 <script>
   const STATE_CODES = {json.dumps(state_codes)};
   const VIEWS_DATA = {json.dumps(views_data)};
+  const STATE_SUMMARY = {json.dumps(state_summary)};
+  const METRIC_ORDER = {json.dumps(metric_order)};
   const LEADER_LATS = {json.dumps(leader_lats)};
   const LEADER_LONS = {json.dumps(leader_lons)};
   const CENTER_LATS = {json.dumps(center_lats)};
@@ -589,12 +911,13 @@ html_template = f"""<!DOCTYPE html>
   let currentYear = "2026";
   let currentScale = "jenks";
   let savedYearScale = "jenks";
+  let selectedState = null;
 
   const initMetricObj = VIEWS_DATA[currentMetric];
   const initDatasetObj = initMetricObj.datasets[currentYear];
   const initScaleObj = initDatasetObj[currentScale];
 
-  // Trace 0: Choropleth
+  // Trace 0: Base Choropleth Map
   const traceChoropleth = {{
     type: "choropleth",
     locations: STATE_CODES,
@@ -613,13 +936,25 @@ html_template = f"""<!DOCTYPE html>
       tickvals: initScaleObj.tickvals,
       ticktext: initScaleObj.ticktext,
       len: 0.72,
-      thickness: 20,
+      thickness: 18,
       outlinewidth: 0
     }},
     hovertemplate: initDatasetObj.hovertemplate
   }};
 
-  // Trace 1: Leader lines stopping at callout anchor points
+  // Trace 1: Selected State Highlight Border Overlay
+  const traceHighlight = {{
+    type: "choropleth",
+    locations: [],
+    z: [],
+    locationmode: "USA-states",
+    colorscale: [[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]],
+    showscale: false,
+    marker: {{ line: {{ color: "#111827", width: 3.2 }} }},
+    hoverinfo: "skip"
+  }};
+
+  // Trace 2: Leader lines stopping at callout anchor points
   const traceLeaders = {{
     type: "scattergeo",
     lat: LEADER_LATS,
@@ -630,7 +965,7 @@ html_template = f"""<!DOCTYPE html>
     showlegend: false
   }};
 
-  // Trace 2: Centered state abbreviations (auto-contrasting white/black per state)
+  // Trace 3: Centered state abbreviations
   const traceCenterLabels = {{
     type: "scattergeo",
     lat: CENTER_LATS,
@@ -643,7 +978,7 @@ html_template = f"""<!DOCTYPE html>
     showlegend: false
   }};
 
-  // Trace 3: Offset callout abbreviations
+  // Trace 4: Offset callout abbreviations
   const traceCalloutLabels = {{
     type: "scattergeo",
     lat: CALLOUT_LATS,
@@ -666,23 +1001,173 @@ html_template = f"""<!DOCTYPE html>
       subunitcolor: "white",
       bgcolor: "rgba(0,0,0,0)"
     }},
-    margin: {{ l: 10, r: 10, t: 10, b: 10 }},
+    margin: {{ l: 0, r: 10, t: 10, b: 10 }},
     paper_bgcolor: "white",
-    height: 580
+    height: 560
   }};
 
-  Plotly.newPlot("disaster-map", [traceChoropleth, traceLeaders, traceCenterLabels, traceCalloutLabels], layout, {{
+  Plotly.newPlot("disaster-map", [traceChoropleth, traceHighlight, traceLeaders, traceCenterLabels, traceCalloutLabels], layout, {{
     responsive: true,
     displayModeBar: false,
     scrollZoom: false,
     doubleClick: false
   }});
 
-  // Block wheel zoom on the SVG geo layer while allowing normal page scrolling
   const mapEl = document.getElementById("disaster-map");
+
+  // Block wheel zoom on the SVG geo layer while allowing normal page scrolling
   mapEl.addEventListener("wheel", (e) => {{
     e.stopImmediatePropagation();
   }}, true);
+
+  function formatChangeBadge(val) {{
+    const rounded = Number(val.toFixed(1));
+    if (rounded > 0) {{
+      return `<span class="chg-up">&#9650; +${{rounded.toFixed(1)}}%</span>`;
+    }} else if (rounded < 0) {{
+      return `<span class="chg-down">&#9660; ${{rounded.toFixed(1)}}%</span>`;
+    }} else {{
+      return `<span class="chg-flat">&#8212; 0.0%</span>`;
+    }}
+  }}
+
+  // Show/Hide Left State Card and resize map accordingly
+  function renderStateCard() {{
+    const cardEl = document.getElementById("state-card");
+
+    if (!selectedState || !STATE_SUMMARY[selectedState]) {{
+      cardEl.classList.remove("visible");
+      cardEl.innerHTML = "";
+      Plotly.Plots.resize(mapEl);
+      return;
+    }}
+
+    cardEl.classList.add("visible");
+    const stObj = STATE_SUMMARY[selectedState];
+    let viewLabel = "";
+    let col2Header = "";
+    let col3Header = "";
+    let footnoteText = "";
+
+    if (currentYear === "2026") {{
+      viewLabel = "October 2026 Survey Profile";
+      col2Header = "2026 % (n)";
+      col3Header = "vs. 2025";
+      footnoteText = "Change shows percentage point shift from Oct 2025 to Oct 2026.";
+    }} else if (currentYear === "2025") {{
+      viewLabel = "October 2025 Survey Profile";
+      col2Header = "2025 % (n)";
+      col3Header = "vs. 2026";
+      footnoteText = "Change shows percentage point difference in 2025 relative to 2026.";
+    }} else {{
+      viewLabel = "2025 &rarr; 2026 Shift Profile";
+      col2Header = "2025 &rarr; 2026";
+      col3Header = "Shift";
+      footnoteText = "Compares 6-month recall (Oct 2025) vs. 12-month recall (Oct 2026).";
+    }}
+
+    let rowsHtml = "";
+    METRIC_ORDER.forEach(mKey => {{
+      const mStats = stObj.metrics[mKey];
+      const isCurrent = (mKey === currentMetric) ? "active-metric-row" : "";
+
+      if (currentYear === "2026") {{
+        rowsHtml += `
+          <tr class="${{isCurrent}}">
+            <td>
+              <div class="metric-name-cell">${{mKey}}</div>
+              <span class="metric-n-sub">n = ${{mStats.n26.toLocaleString()}}</span>
+            </td>
+            <td class="right"><span class="stat-primary">${{mStats.p26.toFixed(1)}}%</span></td>
+            <td class="right">${{formatChangeBadge(mStats.diff_26_from_25)}}</td>
+          </tr>
+        `;
+      }} else if (currentYear === "2025") {{
+        rowsHtml += `
+          <tr class="${{isCurrent}}">
+            <td>
+              <div class="metric-name-cell">${{mKey}}</div>
+              <span class="metric-n-sub">n = ${{mStats.n25.toLocaleString()}}</span>
+            </td>
+            <td class="right"><span class="stat-primary">${{mStats.p25.toFixed(1)}}%</span></td>
+            <td class="right">${{formatChangeBadge(mStats.diff_25_from_26)}}</td>
+          </tr>
+        `;
+      }} else {{
+        rowsHtml += `
+          <tr class="${{isCurrent}}">
+            <td>
+              <div class="metric-name-cell">${{mKey}}</div>
+              <span class="metric-n-sub">n=${{mStats.n25}} &rarr; n=${{mStats.n26}}</span>
+            </td>
+            <td class="right">
+              <span class="stat-flow">${{mStats.p25.toFixed(1)}}%<span class="flow-arrow">&rarr;</span>${{mStats.p26.toFixed(1)}}%</span>
+            </td>
+            <td class="right">${{formatChangeBadge(mStats.diff_26_from_25)}}</td>
+          </tr>
+        `;
+      }}
+    }});
+
+    cardEl.innerHTML = `
+      <div>
+        <div class="card-header">
+          <div>
+            <h2 class="card-state-name">${{stObj.name}} (${{selectedState}})</h2>
+            <span class="card-view-badge">${{viewLabel}}</span>
+          </div>
+          <button class="clear-btn" id="clear-state-btn" title="Close state card">&#10005; Clear</button>
+        </div>
+        <table class="card-table">
+          <thead>
+            <tr>
+              <th>Disaster Type</th>
+              <th class="right">${{col2Header}}</th>
+              <th class="right">${{col3Header}}</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${{rowsHtml}}
+          </tbody>
+        </table>
+      </div>
+      <div class="card-footnote">${{footnoteText}}</div>
+    `;
+
+    // Resize Plotly map so it fits cleanly next to the newly opened card
+    Plotly.Plots.resize(mapEl);
+
+    document.getElementById("clear-state-btn").addEventListener("click", () => {{
+      selectedState = null;
+      updateStateHighlight();
+      renderStateCard();
+    }});
+  }}
+
+  function updateStateHighlight() {{
+    if (selectedState) {{
+      Plotly.restyle("disaster-map", {{
+        locations: [[selectedState]],
+        z: [[1]]
+      }}, [1]);
+    }} else {{
+      Plotly.restyle("disaster-map", {{
+        locations: [[]],
+        z: [[]]
+      }}, [1]);
+    }}
+  }}
+
+  mapEl.on("plotly_click", (data) => {{
+    if (data && data.points && data.points.length > 0) {{
+      const clickedLoc = data.points[0].location;
+      if (clickedLoc) {{
+        selectedState = (selectedState === clickedLoc) ? null : clickedLoc;
+        updateStateHighlight();
+        renderStateCard();
+      }}
+    }}
+  }});
 
   function updateDashboard() {{
     const btnJenks = document.getElementById("btn-jenks");
@@ -711,7 +1196,6 @@ html_template = f"""<!DOCTYPE html>
     const datasetObj = metricObj.datasets[currentYear];
     const scaleObj = datasetObj[currentScale];
 
-    // 1. Update Question Subtitle (no brackets, #00a38d highlights, 6 vs 12 months)
     let monthsText = "Twelve Months";
     if (currentYear === "2025") {{
       monthsText = "Six Months";
@@ -722,7 +1206,6 @@ html_template = f"""<!DOCTYPE html>
     const qEl = document.getElementById("question-text");
     qEl.innerHTML = `"Have You Personally Experienced <span class="question-highlight">${{metricObj.question_text}}</span> In The Last <span class="question-highlight">${{monthsText}}</span>?"`;
 
-    // 2. Update Survey Subtext (with red warning note when Percentage Point Shift is active)
     const subEl = document.getElementById("survey-subtext");
     if (currentYear === "2026") {{
       subEl.innerHTML = "Nationally Representative Survey (n=1500), October 2026";
@@ -732,7 +1215,6 @@ html_template = f"""<!DOCTYPE html>
       subEl.innerHTML = 'Comparison of Nationally Representative Surveys (October 2025 vs. October 2026, n=1500) <span class="subtext-note">Note: this is a comparison of experiences over different time periods</span>';
     }}
 
-    // 3. Update Map Colorscale & Legend
     const colorscale = (currentYear === "change") ? metricObj.colorscale_change : metricObj.colorscale_year;
     let breakLabel = (currentScale === "jenks") ? "Natural Breaks (Jenks)" : "20% Equal Intervals";
     if (currentYear === "change") {{
@@ -741,7 +1223,6 @@ html_template = f"""<!DOCTYPE html>
 
     const colorbarTitle = `<b>${{datasetObj.legend_title}}</b><br><span style="font-size:11px;color:#6b7280">${{breakLabel}}</span>`;
 
-    // Restyle Trace 0 (Choropleth)
     Plotly.restyle("disaster-map", {{
       z: [scaleObj.z],
       zmin: [scaleObj.zmin],
@@ -754,10 +1235,13 @@ html_template = f"""<!DOCTYPE html>
       "colorbar.title.text": [colorbarTitle]
     }}, [0]);
 
-    // Restyle Trace 2 (Centered state label colors for contrast against dark bins)
     Plotly.restyle("disaster-map", {{
       "textfont.color": [scaleObj.textcolors]
-    }}, [2]);
+    }}, [3]);
+
+    if (selectedState) {{
+      renderStateCard();
+    }}
   }}
 
   document.querySelectorAll("#metric-buttons .btn").forEach(btn => {{
@@ -786,6 +1270,25 @@ html_template = f"""<!DOCTYPE html>
       updateDashboard();
     }});
   }});
+
+  // Methodology Modal Controls
+  const modalBackdrop = document.getElementById("methodology-modal-backdrop");
+  document.getElementById("open-methodology-btn").addEventListener("click", () => {{
+    modalBackdrop.classList.add("open");
+  }});
+  document.getElementById("close-methodology-btn").addEventListener("click", () => {{
+    modalBackdrop.classList.remove("open");
+  }});
+  modalBackdrop.addEventListener("click", (e) => {{
+    if (e.target === modalBackdrop) {{
+      modalBackdrop.classList.remove("open");
+    }}
+  }});
+  document.addEventListener("keydown", (e) => {{
+    if (e.key === "Escape" && modalBackdrop.classList.contains("open")) {{
+      modalBackdrop.classList.remove("open");
+    }}
+  }});
 </script>
 
 </body>
@@ -795,4 +1298,4 @@ html_template = f"""<!DOCTYPE html>
 with open('index.html', 'w', encoding='utf-8') as f:
     f.write(html_template)
 
-print("SUCCESS! Saved index.html with pooled Jenks breaks, -50% to +50% shift scale, auto-contrasting labels, and corrected footer!")
+print("SUCCESS! Saved index.html with collapsible State Card and top-right Map Methodology modal!")
