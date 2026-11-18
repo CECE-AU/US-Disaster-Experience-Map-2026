@@ -1190,6 +1190,15 @@
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") modalBackdrop.classList.remove("open"); });
 
   initDashboardFromCSVs();
+
+  // Broadcast exact dashboard height to parent WordPress iframe whenever layout changes
+  const sendHeightToParent = () => {
+    const height = document.documentElement.scrollHeight;
+    window.parent.postMessage({ type: "cece-map-resize", height: height }, "*");
+  };
+  new ResizeObserver(sendHeightToParent).observe(document.body);
+  window.addEventListener("load", sendHeightToParent);
+  
 </script>
 </body>
 </html>
